@@ -1,7 +1,9 @@
-customtkinter
+# requirements.txt
 pyserial
-matplotlib
 meshtastic
+matplotlib
 pandas
+numpy
+tk
+pillow
 tkintermapview
-Pillow

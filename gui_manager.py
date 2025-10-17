@@ -299,7 +299,7 @@ class App(ctk.CTk):
         self.tabs['analysis'].update_log(analysis_message)
 
         if len(processed_data) > 1:
-            smoothed_data = self.data_processor.process_data(processed_data)
+            smoothed_data = self.data_processor.smooth_data(processed_data)
             if smoothed_data:
                 self.db_manager.insert_reading(smoothed_data)
                 self.log_queue.put(("DEBUG", f"Nueva lectura guardada en BD para {node_id[-4:]}"))
@@ -479,7 +479,16 @@ class App(ctk.CTk):
         for widget_data in self.tabs['dashboard'].widgets.values():
             if widget_data["info"]["type"] == "actuador":
                 widget_data["elements"]["button"].configure(state=state, text=text)
+    def on_closing(self):
+        if messagebox.askokcancel("Salir", "¿Estás seguro de que quieres salir?"):
+            print("Cerrando la aplicación...")
+            if self.serial_manager:
+                self.serial_manager.stop() # ¡Línea clave!
+            self.root.destroy()
 
+    # Y asignarlo a la ventana
+    self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
     def _restore_actuator_buttons(self):
         self.tabs['detail'].update_actuator_button_state()
         for widget_data in self.tabs['dashboard'].widgets.values():

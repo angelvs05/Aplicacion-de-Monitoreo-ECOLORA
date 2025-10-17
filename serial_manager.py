@@ -122,6 +122,18 @@ class SerialManager:
         else:
             self.log_queue.put(("ERROR", f"No se pudo enviar la alerta. Canal '{channel_name}' no encontrado."))
 
+    def read_from_port(self):
+        while self.running:
+            try:
+                # Tu lógica de lectura actual
+                line = self.serial_port.readline()
+                # ...
+            except serial.SerialException:
+                print("Error: Se perdió la conexión con el puerto serial.")
+                self.gui_queue.put(('serial_disconnected', None)) # Notificar a la GUI
+                self.running = False # Detener el hilo de forma segura
+                break
+            
     def set_node_config(self, setting_name, value):
         if self.interface and self.local_node_num:
             self.log_queue.put(("DEBUG", f"Configurando '{setting_name}' a '{value}'..."))
