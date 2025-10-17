@@ -487,8 +487,8 @@ class App(ctk.CTk):
             self.root.destroy()
 
     # Y asignarlo a la ventana
-    self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
     def _restore_actuator_buttons(self):
         self.tabs['detail'].update_actuator_button_state()
         for widget_data in self.tabs['dashboard'].widgets.values():
