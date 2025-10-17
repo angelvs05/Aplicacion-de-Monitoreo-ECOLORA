@@ -1,165 +1,171 @@
 # =============================================================================
-# ### ARCHIVO: serial_manager.py ###
+# ### ARCHIVO: serial_manager.py (CORREGIDO) ###
 # =============================================================================
+import serial
+import serial.tools.list_ports
+import threading
+import time
+import json
 import meshtastic
 import meshtastic.serial_interface
 from pubsub import pub
-import serial.tools.list_ports
 
 class SerialManager:
-    def __init__(self, full_packet_queue, status_callback, log_queue, error_queue):
-        self.interface = None
-        self.full_packet_queue = full_packet_queue
-        self.status_callback = status_callback
+    def __init__(self, gui_queue, log_queue):
+        self.gui_queue = gui_queue
         self.log_queue = log_queue
-        self.error_queue = error_queue
-        self.local_node_num = None
-
-        pub.subscribe(self.on_receive, "meshtastic.receive")
-        pub.subscribe(self.on_connection_established, "meshtastic.connection.established")
-        pub.subscribe(self.on_connection_lost, "meshtastic.connection.lost")
+        self.serial_port = None
+        self.interface = None
+        self.running = False
+        self.thread = None
+        self.is_meshtastic_device = False
+        self.callbacks_registered = False
 
     def get_available_ports(self):
-        return [port.device for port in serial.tools.list_ports.comports()]
-
-    def find_meshtastic_port(self):
-        for port in serial.tools.list_ports.comports():
-            if port.vid == 0x10C4 and port.pid == 0xEA60: return port.device
-            if port.vid == 0x1A86 and port.pid == 0x7523: return port.device
-            if "Meshtastic" in port.description or "CP210x" in port.description or "CH9102" in port.description:
-                return port.device
-        return None
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports]
 
     def connect(self, port):
-        self.log_queue.put(("INFO", f"Iniciando proceso de conexión en el puerto {port}..."))
+        self.log_queue.put(('INFO', f"Iniciando proceso de conexión en el puerto {port}..."))
         try:
+            # Primero, intenta conectar como un dispositivo Meshtastic
+            self.log_queue.put(('INFO', "Intentando conectar con la librería Meshtastic..."))
             self.interface = meshtastic.serial_interface.SerialInterface(port)
-            self.log_queue.put(("INFO", "Interfaz serial creada. Esperando confirmación del dispositivo..."))
-        except Exception as e:
-            error_message = f"FALLO LA CONEXIÓN: {e}"
-            self.log_queue.put(("ERROR", error_message))
-            self.error_queue.put(("Error de Conexión", f"No se pudo conectar al puerto {port}.\n\nAsegúrate de que el dispositivo esté bien conectado y que no esté siendo usado por otro programa.\n\nDetalle: {e}"))
-            if self.status_callback:
-                self.status_callback(f"Error al conectar", "red", False)
-    
-    def disconnect(self):
-        if self.interface:
-            self.log_queue.put(("INFO", "Desconectando..."))
-            try:
-                self.interface.close()
-            except Exception as e:
-                self.log_queue.put(("ERROR", f"Error al desconectar: {e}"))
-            finally:
-                self.interface = None
-                self.local_node_num = None
-                if self.status_callback:
-                    self.status_callback("Desconectado", "white", False)
-
-    def on_receive(self, packet, interface):
-        self.full_packet_queue.put(packet)
-        self.log_queue.put(("RECV", f"Recibido paquete de {packet.get('fromId', 'Unknown')}"))
-
-    def on_connection_established(self, interface):
-        try:
-            node_info = interface.myInfo
-            self.local_node_num = node_info.my_node_num
-            self.log_queue.put(("INFO", f"¡Conexión exitosa! Info:\n{node_info}"))
             
-            interface.sendText("!ECOLORA_SONDEO")
+            # Si la línea anterior no lanza excepción, es un dispositivo Meshtastic
+            self.is_meshtastic_device = True
+            self.log_queue.put(('INFO', f"¡Conexión Meshtastic exitosa! Info:\n{self.interface.getMyNodeInfo()}"))
+            
+            # Registrar callbacks si no se han registrado antes
+            if not self.callbacks_registered:
+                pub.subscribe(self.on_receive, "meshtastic.receive")
+                pub.subscribe(self.on_connection_status, "meshtastic.connection.status")
+                self.callbacks_registered = True
 
-            if self.status_callback:
-                self.status_callback(f"Conectado", "green", True, node_info.my_node_num)
-        except Exception as e:
-            self.log_queue.put(("ERROR", f"Error en on_connection_established: {e}"))
-            self.error_queue.put(("Error de Conexión", f"Se estableció la conexión pero no se pudo leer la información del nodo.\n\nDetalle: {e}"))
+            self.running = True
+            self.thread = threading.Thread(target=self.meshtastic_loop, daemon=True)
+            self.thread.start()
+            self.gui_queue.put(('connection_status', (True, f"Conectado a Meshtastic en {port}")))
 
-    def on_connection_lost(self, interface):
-        self.log_queue.put(("ERROR", "Conexión con el nodo perdida."))
-        if self.status_callback:
-            self.status_callback("Conexión perdida", "orange", False)
-
-    def get_channels(self):
-        if self.interface and hasattr(self.interface.localNode, 'channels') and self.interface.localNode.channels:
-            return self.interface.localNode.channels
-        return []
-
-    def send_text_message(self, text, channel_index=0, destination_id="^all", want_ack=False):
-        """Función de envío de mensajes actualizada para manejar confirmaciones (ACKs)."""
-        if self.interface:
+        except meshtastic.MeshtasticError as e:
+            self.log_queue.put(('WARNING', f"No es un dispositivo Meshtastic ({e}). Intentando como puerto serial genérico..."))
+            self.is_meshtastic_device = False
+            self.interface = None # Asegurarse de que la interfaz esté limpia
             try:
-                # El parámetro wantAck=True le dice a la librería que espere confirmación
-                self.interface.sendText(text=text, destinationId=destination_id, channelIndex=channel_index, wantAck=want_ack)
-                
-                log_msg = f"Enviando '{text}' a {destination_id}"
-                if want_ack:
-                    log_msg += " (esperando confirmación...)"
-                self.log_queue.put(("SENT", log_msg))
-                return True
-            except Exception as e:
-                # Si el tiempo de espera (ack_timeout) se agota, la librería lanza una excepción
-                self.log_queue.put(("ERROR", f"Al enviar mensaje: {e}"))
+                # Si falla, intenta abrir como un puerto serial estándar
+                self.serial_port = serial.Serial(port, 9600, timeout=1)
+                self.running = True
+                self.thread = threading.Thread(target=self.read_from_port, daemon=True)
+                self.thread.start()
+                self.log_queue.put(('INFO', f"Conectado como puerto serial genérico en {port}."))
+                self.gui_queue.put(('connection_status', (True, f"Conectado a {port}")))
+            except serial.SerialException as serial_e:
+                self.log_queue.put(('ERROR', f"No se pudo conectar al puerto {port}: {serial_e}"))
+                self.gui_queue.put(('connection_status', (False, "Error de conexión")))
                 return False
-        return False
+        return True
 
-    def send_message_to_channel_by_name(self, channel_name, text):
-        if not self.interface:
-            self.log_queue.put(("ERROR", "No se puede enviar mensaje, no hay conexión."))
-            return
-
-        channels = self.get_channels()
-        target_channel_index = -1
-        if channel_name.lower() == 'primary':
-            target_channel_index = 0
-        else:
-            for i, ch in enumerate(channels):
-                if hasattr(ch, 'settings') and ch.settings.name == channel_name:
-                    target_channel_index = i
-                    break
-        
-        if target_channel_index != -1:
-            self.send_text_message(text, channel_index=target_channel_index)
-            self.log_queue.put(("SENT", f"Alerta enviada al canal '{channel_name}': {text}"))
-        else:
-            self.log_queue.put(("ERROR", f"No se pudo enviar la alerta. Canal '{channel_name}' no encontrado."))
-
+    # --- INICIO DE LA SECCIÓN CORREGIDA ---
     def read_from_port(self):
+        """Bucle principal para leer datos del puerto serial."""
         while self.running:
             try:
-                # Tu lógica de lectura actual
-                line = self.serial_port.readline()
-                # ...
-            except serial.SerialException:
-                print("Error: Se perdió la conexión con el puerto serial.")
-                self.gui_queue.put(('serial_disconnected', None)) # Notificar a la GUI
-                self.running = False # Detener el hilo de forma segura
-                break
-            
-    def set_node_config(self, setting_name, value):
-        if self.interface and self.local_node_num:
-            self.log_queue.put(("DEBUG", f"Configurando '{setting_name}' a '{value}'..."))
-            try:
-                setting_name_fixed = setting_name.replace('-', '_')
-                parts = setting_name_fixed.split('.')
-                if len(parts) == 2:
-                    self.interface.localNode.setPref(parts[1], value)
-                    self.interface.localNode.writeConfig()
-                    self.log_queue.put(("INFO", f"Configuración '{setting_name}' aplicada y guardada en el nodo."))
+                if self.serial_port and self.serial_port.is_open:
+                    line = self.serial_port.readline()
+                    if line:
+                        try:
+                            packet_str = line.decode('utf-8').strip()
+                            self.gui_queue.put(packet_str) 
+                            self.log_queue.put(('RECV', packet_str))
+                        except UnicodeDecodeError:
+                            pass # Ignorar líneas que no son utf-8
                 else:
-                    self.log_queue.put(("ERROR", f"Nombre de config inválido: {setting_name}"))
-            except Exception as e:
-                self.log_queue.put(("ERROR", f"Al enviar config: {e}"))
+                    time.sleep(1)
 
-    def request_all_positions(self):
-        if self.interface:
-            try:
-                self.interface.sendText("!request_position")
-                return True
+            except serial.SerialException as e:
+                # Esta es la lógica clave para manejar la desconexión
+                self.log_queue.put(('ERROR', f"Error de puerto serial: {e}"))
+                self.log_queue.put(('ERROR', "Dispositivo desconectado. Deteniendo hilo."))
+                
+                # Notifica a la GUI que la conexión se ha perdido
+                self.gui_queue.put(('serial_disconnected', None))
+                
+                self.running = False # Detiene el bucle
+                break # Sale del bucle while
+            
             except Exception as e:
-                self.log_queue.put(("ERROR", f"Fallo al enviar solicitud de posición: {e}"))
-                return False
-        return False
+                self.log_queue.put(('ERROR', f"Error inesperado en read_from_port: {e}"))
+                self.running = False
+                break
+    # --- FIN DE LA SECCIÓN CORREGIDA ---
+
+    def meshtastic_loop(self):
+        """Bucle para mantener viva la conexión de Meshtastic."""
+        while self.running:
+            time.sleep(1)
+        self.log_queue.put(("INFO", "Bucle de Meshtastic detenido."))
+
+    def on_receive(self, packet, interface):
+        """Callback para cuando se recibe un paquete de Meshtastic."""
+        self.log_queue.put(('RECV', f"Recibido paquete de {packet.get('fromId', 'N/A')}"))
+        try:
+            # Enviar el paquete completo a la GUI para ser procesado
+            self.gui_queue.put(packet)
+        except Exception as e:
+            self.log_queue.put(('ERROR', f"Error al procesar paquete en on_receive: {e}"))
+
+    def on_connection_status(self, status):
+        """Callback para cambios en el estado de la conexión."""
+        self.log_queue.put(('INFO', f"Estado de conexión Meshtastic: {status}"))
+    
+    def send_command(self, command):
+        """Envía un comando al dispositivo."""
+        if self.is_meshtastic_device and self.interface:
+            try:
+                self.interface.sendText(command)
+                self.log_queue.put(('SENT', f"Enviando '{command}' a ^all"))
+            except Exception as e:
+                 self.log_queue.put(('ERROR', f"Error al enviar por Meshtastic: {e}"))
+        elif self.serial_port and self.serial_port.is_open:
+            try:
+                self.serial_port.write(command.encode('utf-8'))
+                self.log_queue.put(('SENT', f"Enviando '{command}' a {self.serial_port.port}"))
+            except Exception as e:
+                 self.log_queue.put(('ERROR', f"Error al enviar por serial: {e}"))
+        else:
+            self.log_queue.put(('ERROR', "No hay conexión para enviar el comando."))
+
+    def send_message_to_channel_by_name(self, channel_name, message):
+        if not self.is_meshtastic_device or not self.interface:
+            self.log_queue.put(("ERROR", "No se puede enviar mensaje, no es un dispositivo Meshtastic válido."))
+            return
         
-    def is_node_known(self, node_id):
-        if self.interface and self.interface.nodes:
-            return self.interface.getNode(node_id) is not None
-        return False
+        try:
+            channel_index = -1
+            for ch in self.interface.channels:
+                if ch.settings.name == channel_name:
+                    channel_index = ch.index
+                    break
+
+            if channel_index != -1:
+                self.interface.sendText(message, channelIndex=channel_index)
+                self.log_queue.put(("SENT", f"Alerta enviada al canal '{channel_name}': {message}"))
+            else:
+                self.log_queue.put(("ERROR", f"No se encontró el canal '{channel_name}' para enviar el mensaje."))
+
+        except Exception as e:
+            self.log_queue.put(("ERROR", f"Error enviando mensaje al canal: {e}"))
+    
+    def stop(self):
+        """Detiene el hilo de lectura y cierra el puerto serial."""
+        self.running = False
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=2)
+        
+        if self.is_meshtastic_device and self.interface:
+            self.interface.close()
+            self.log_queue.put(('INFO', "Conexión Meshtastic cerrada."))
+        
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.close()
+            self.log_queue.put(('INFO', f"Puerto {self.serial_port.port} cerrado."))

@@ -101,7 +101,39 @@ class DataProcessor:
                     self.db_manager.insert_alert(node_id, message, "WARNING")
             
             self.last_battery_check[node_id] = {"level": current_battery, "time": now}
-            
+
+    def smooth_data(self, data):
+        """Aplica un suavizado de promedio móvil a los datos del nodo."""
+        node_id = data.get('node_id')
+        if not node_id:
+            return data # Devuelve los datos originales si no hay ID de nodo
+
+        # Inicializa el historial para un nodo nuevo
+        if node_id not in self.node_data_history:
+            self.node_data_history[node_id] = {
+                'temperature': collections.deque(maxlen=self.window_size),
+                'humidity': collections.deque(maxlen=self.window_size),
+                'pressure': collections.deque(maxlen=self.window_size),
+                'battery': collections.deque(maxlen=self.window_size),
+            }
+
+        history = self.node_data_history[node_id]
+        smoothed_data = data.copy()
+
+        # Itera sobre las métricas que se pueden promediar
+        for metric in ['temperature', 'humidity', 'pressure', 'battery']:
+            if metric in data and data[metric] is not None:
+                # Agrega el nuevo valor al historial
+                history[metric].append(data[metric])
+
+                # Calcula el promedio móvil si el historial está lleno
+                if len(history[metric]) > 0:
+                    avg_value = sum(history[metric]) / len(history[metric])
+                    # Redondea para que no tenga tantos decimales
+                    smoothed_data[metric] = round(avg_value, 2)
+
+        return smoothed_data
+     
     def get_bot_analysis_message(self, data):
         alias = data.get('alias', data.get('node_id', 'desconocido')[-4:])
         temp = data.get('temperature')

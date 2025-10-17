@@ -1,9 +1,12 @@
-# requirements.txt
-pyserial
+# =============================================================================
+# ### ARCHIVO: requirements.txt 
+# =============================================================================
+customtkinter
 meshtastic
-matplotlib
+pyserial
 pandas
+matplotlib
 numpy
-tk
 pillow
+tkcalendar
 tkintermapview
