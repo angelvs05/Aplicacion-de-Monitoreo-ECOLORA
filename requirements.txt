@@ -1,0 +1,7 @@
+customtkinter
+pyserial
+matplotlib
+meshtastic
+pandas
+tkintermapview
+Pillow
